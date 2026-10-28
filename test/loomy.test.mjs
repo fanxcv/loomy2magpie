@@ -279,6 +279,16 @@ describe("login flow (mocked account service)", () => {
       expect(result.key).toBe("S-AUTH");
       expect(result.metadata.email).toBe("13800138000");
       expect(result.metadata.password).toBe("pw");
+
+      // 模拟 magpie host.js 的 save(): inputs 与 result.metadata 合并，只留 key/metadata。
+      const stored = {
+        type: "api",
+        key: result.key,
+        metadata: { phone: "13800138000", password: "pw", ...result.metadata },
+      };
+      const loader = await hooks.auth.loader(async () => stored);
+      expect(loader.apiKey).toBe("S-AUTH");
+      expect(loader.headers.token).toBe("S-AUTH");
     } finally {
       globalThis.fetch = original;
     }
