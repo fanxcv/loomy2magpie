@@ -1,0 +1,25 @@
+{
+  "name": "opencode-loomy-auth",
+  "version": "0.1.0",
+  "description": "magpie / OpenCode provider plugin: Loomy (讯飞) 手机号登录与模型网关",
+  "type": "module",
+  "main": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "lib",
+    "README.md"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "loomy",
+    "magpie"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "bun test"
+  },
+  "magpie": {
+    "maxConcurrency": 4
+  }
+}

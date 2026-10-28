@@ -1,0 +1,4 @@
+node_modules/
+ref-loomy2api/
+*.log
+.DS_Store
