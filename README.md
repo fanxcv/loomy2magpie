@@ -22,21 +22,20 @@ magpie quota
 | Loomy 手机号 + 密码 | `key` = session，`metadata` = 手机号、密码、设备标识 | 会自动重登；密码以明文写进 magpie 的 `plugin-auth.json` |
 | 粘贴已有 session | `key` = session | 不落密码，14 天后需重新粘贴 |
 
-一个供应商可以登录多次，magpie 用 `accountId`（手机号）区分账号，并把请求分给它们。多账号、故障切换、429 冷却都由 magpie 处理。
+一个供应商可以登录多次，magpie 用 `metadata.email`（这里放手机号）区分账号，并把请求分给它们。多账号、故障切换、429 冷却都由 magpie 处理。
 
 ## 它做了什么
 
 | 钩子 | 行为 |
 |---|---|
 | `config` | 注册供应商 `loomy`，`@ai-sdk/openai-compatible`，基址 `https://loomyad.xunfei.cn/api/v1`，附 11 个兜底模型 |
-| `auth.methods` | 手机号 + 密码（`authorize` 内完成登录），或直接粘贴 session |
+| `auth.methods` | 手机号 + 密码（`keyless` + `authorize` 内完成登录，不再要求 API key），或直接粘贴 session |
 | `auth.loader` | 返回 `baseURL` 和 `fetch`；每个请求注入 `Authorization: Bearer`、`token`、`traceparent`、`loomy-version` |
-| `auth.refresh` | 到期前 24 小时用保存的手机号/密码重新登录（宿主支持时） |
 | `auth.usage` | `GET /points/records` → 可用 / 余额 / 每日积分 |
 | `provider.models` | `GET /models` 动态列表，失败时沿用内置清单 |
 | 401 | 自动重登一次并重试，新 session 写回账号 |
 
-session 有效期 14 天，没有 refresh token。插件在 loader 和请求 401 时都会自愈，所以通常不需要手动重新登录。
+session 有效期 14 天，没有 refresh token；magpie 的 `auth.refresh` 只续期 oauth 账号，所以本插件在 loader 发现 session 将过期、以及请求 401 时自行重登。通常不需要手动重新登录。
 
 ## 与 loomy2api 的对应
 

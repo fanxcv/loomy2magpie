@@ -13,7 +13,6 @@ import {
 } from "./lib/loomy.mjs";
 import { FALLBACK_MODELS, mergeModels, toConfigModels } from "./lib/models.mjs";
 
-const VERSION = "0.1.0";
 const REFRESH_LEAD = 24 * 3600 * 1000;
 
 const metaOf = (auth) =>
@@ -63,24 +62,23 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
   return {
     config: async (cfg) => {
       cfg.provider ??= {};
-      cfg.provider[PROVIDER] = {
+      cfg.provider[PROVIDER] ??= {
         name: "Loomy（讯飞）",
         npm: "@ai-sdk/openai-compatible",
         api: BASE,
         models: toConfigModels(FALLBACK_MODELS),
-        ...(cfg.provider[PROVIDER] || {}),
       };
     },
 
     auth: {
       provider: PROVIDER,
-      refreshLead: REFRESH_LEAD,
 
       methods: [
         {
           type: "api",
           label: "Loomy 手机号 + 密码",
           placeholder: "13800138000",
+          keyless: true,
           prompts: [
             {
               type: "text",
@@ -105,10 +103,8 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
               return {
                 type: "success",
                 key: got.session,
-                accountId: got.phone || phone,
-                uid: got.userid || undefined,
-                expires: Date.now() + SESSION_TTL,
                 metadata: {
+                  email: got.phone || phone,
                   phone,
                   password,
                   userId: got.userid,
@@ -180,11 +176,6 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
             if (response.status === 401 && !state.retried && meta.phone && meta.password) {
               state.retried = true;
               try {
-                await response.body?.cancel();
-              } catch {
-                // 忽略
-              }
-              try {
                 const session = await relogin();
                 response = await send(input, init, session);
               } catch (error) {
@@ -195,23 +186,6 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
           },
         };
       },
-
-      async refresh(auth) {
-        const meta = metaOf(auth);
-        if (!meta.phone || !meta.password) return;
-        const got = await login(meta.phone, meta.password, meta.identity);
-        return {
-          key: got.session,
-          expires: Date.now() + SESSION_TTL,
-          metadata: {
-            ...meta,
-            userId: got.userid || meta.userId,
-            identity: got.identity,
-            obtainedAt: Date.now(),
-          },
-        };
-      },
-
       async usage(getAuth) {
         const auth = await getAuth();
         const meta = metaOf(auth);
@@ -257,12 +231,6 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
           return base;
         }
       },
-    },
-
-    "chat.headers": async (input, output) => {
-      if (input?.model?.providerID === PROVIDER) {
-        output.headers["x-loomy-plugin"] = `opencode-loomy-auth/${VERSION}`;
-      }
     },
   };
 };

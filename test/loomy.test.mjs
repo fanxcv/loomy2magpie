@@ -172,6 +172,12 @@ describe("plugin hooks", () => {
     expect(method.type).toBe("api");
     expect(method.authorize).toBeUndefined();
   });
+
+  test("the phone method is keyless so magpie does not ask for an API key", async () => {
+    const hooks = await LoomyAuthPlugin({ client: fakeClient });
+    expect(hooks.auth.methods[0].keyless).toBe(true);
+    expect(typeof hooks.auth.methods[0].authorize).toBe("function");
+  });
 });
 
 describe("login flow (mocked account service)", () => {
@@ -271,9 +277,8 @@ describe("login flow (mocked account service)", () => {
       });
       expect(result.type).toBe("success");
       expect(result.key).toBe("S-AUTH");
-      expect(result.accountId).toBe("13800138000");
+      expect(result.metadata.email).toBe("13800138000");
       expect(result.metadata.password).toBe("pw");
-      expect(result.expires).toBeGreaterThan(Date.now());
     } finally {
       globalThis.fetch = original;
     }
