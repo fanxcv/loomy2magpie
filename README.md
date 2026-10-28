@@ -57,7 +57,7 @@ Loomy 没有 OAuth / 设备码授权接口。官方网页版 `https://loomy.xunf
 | `auth.methods` | 四种：桌面端自动导入、手机号+短信验证码、手机号+密码（keyless + authorize），或直接粘贴 session |
 | `auth.loader` | 返回 `baseURL` 和 `fetch`；每个请求注入 `Authorization: Bearer`、`token`、`traceparent`、`loomy-version` |
 | `auth.usage` | `GET /points/records`（v2，v1 回退）→ 钱包窗口：`balance` 可用积分、`resetsAt`/`span` 北京日 0 点重置、`runsOut` 当日会作废的每日积分 |
-| `auth.checkin` | `POST /points/first-login` → 每日赠送积分刷新（按天幂等） |
+| `auth.checkin` | `POST /points/first-login` → 每日赠送积分刷新（按天幂等），回报 `until` = 北京日 0 点 |
 | `provider.models` | `GET /models` 动态列表，失败时沿用内置清单 |
 | 401 | 自动重登一次并重试，新 session 写回账号 |
 

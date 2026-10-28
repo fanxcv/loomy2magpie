@@ -353,7 +353,13 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
           if (!res.ok || (code && code !== "000000" && code !== 0 && code !== "0")) {
             throw new Error(payload?.desc || payload?.message || `HTTP ${res.status}`);
           }
-          return { outcome: "claimed", message: "每日赠送积分已刷新" };
+          // until 告诉 magpie 何时再来问：北京日 0 点，与 usage 的重置窗口一致。
+          // 不给 until 时，magpie 当天失败后不再重试，签到页会一直挂着旧结果。
+          return {
+            outcome: "claimed",
+            message: "每日赠送积分已刷新",
+            until: new Date(nextDailyReset()).toISOString(),
+          };
         } catch (error) {
           return { outcome: "failed", message: String(error.message || error) };
         }

@@ -373,6 +373,11 @@ describe("login flow (mocked account service)", () => {
       expect(result.outcome).toBe("claimed");
       expect(seen.url).toBe("https://loomyad.xunfei.cn/api/v1/points/first-login");
       expect(seen.method).toBe("POST");
+      // until 落在北京日 0 点，且在将来
+      const until = Date.parse(result.until);
+      expect(new Date(until).toISOString()).toBe(result.until);
+      expect(until).toBeGreaterThan(Date.now());
+      expect((until + 8 * 3600 * 1000) % 86400000).toBe(0);
     } finally {
       globalThis.fetch = original;
     }
