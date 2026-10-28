@@ -349,6 +349,24 @@ describe("login flow (mocked account service)", () => {
       globalThis.fetch = original;
     }
   });
+
+  test("checkin posts first-login and reports success", async () => {
+    const original = globalThis.fetch;
+    let seen;
+    globalThis.fetch = async (url, init) => {
+      seen = { url: String(url), method: init.method, body: init.body };
+      return json({ code: "000000" });
+    };
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      const result = await hooks.auth.checkin(async () => ({ type: "api", key: "S", metadata: {} }));
+      expect(result.outcome).toBe("success");
+      expect(seen.url).toBe("https://loomyad.xunfei.cn/api/v1/points/first-login");
+      expect(seen.method).toBe("POST");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
 });
 
 describe("sms and desktop import", () => {

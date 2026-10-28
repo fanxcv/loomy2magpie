@@ -1,6 +1,6 @@
 # opencode-loomy-auth
 
-把 **Loomy（讯飞）** 账号变成 magpie / OpenCode 的一个供应商：手机号 + 密码登录，拿 14 天 session，替 agent 发 OpenAI 兼容请求。
+把 **Loomy（讯飞）** 账号变成 magpie / OpenCode 的一个供应商：手机号+密码、手机号+短信、桌面端登录态导入或粘贴 session，拿到 14 天 session，替 agent 发 OpenAI 兼容请求。
 
 本包是 [loomy2api](https://github.com/Patrick130306/loomy2api) 的插件化移植：只保留账号服务签名、密码 RSA 加密、session 管理与模型网关请求头。HTTP 网关、账号池、失败切换、限流、面板、Anthropic 协议转换都由 magpie 自带，不再重复实现。
 
@@ -54,9 +54,10 @@ Loomy 没有 OAuth / 设备码授权接口。官方网页版 `https://loomy.xunf
 | 钩子 | 行为 |
 |---|---|
 | `config` | 注册供应商 `loomy`，`@ai-sdk/openai-compatible`，基址 `https://loomyad.xunfei.cn/api/v1`，附 11 个兜底模型 |
-| `auth.methods` | 手机号 + 密码（`keyless` + `authorize` 内完成登录，不再要求 API key），或直接粘贴 session |
+| `auth.methods` | 四种：桌面端自动导入、手机号+短信验证码、手机号+密码（keyless + authorize），或直接粘贴 session |
 | `auth.loader` | 返回 `baseURL` 和 `fetch`；每个请求注入 `Authorization: Bearer`、`token`、`traceparent`、`loomy-version` |
 | `auth.usage` | `GET /points/records` → 可用 / 余额 / 每日积分 |
+| `auth.checkin` | `POST /points/first-login` → 每日赠送积分刷新（按天幂等） |
 | `provider.models` | `GET /models` 动态列表，失败时沿用内置清单 |
 | 401 | 自动重登一次并重试，新 session 写回账号 |
 
@@ -76,7 +77,6 @@ session 有效期 14 天，没有 refresh token；magpie 的 `auth.refresh` 只�
 
 ## 没包含
 
-- **每日签到**：Loomy 侧没有可用的每日签到接口；`/points/first-login` 是首次登录奖励，不是签到，故不实现 `auth.checkin`。
 - **Anthropic `/v1/messages`**：magpie 网关把 agent 的任意协议转成 chat completions，再交给本插件。
 - **HTTP 代理**：插件使用宿主 fetch；需要代理时在 magpie 进程环境里配 `HTTPS_PROXY`。
 
@@ -86,7 +86,7 @@ session 有效期 14 天，没有 refresh token；magpie 的 `auth.refresh` 只�
 bun test
 ```
 
-测试覆盖：签名黄金向量、RSA/PKCS#1 v1.5 与 Python 端口逐字节一致、登录请求形状、401 重登、模型映射、usage 映射。
+测试覆盖：签名黄金向量、RSA/PKCS#1 v1.5 与 Python 端口逐字节一致、登录请求形状、401 重登、短信/桌面导入、模型映射、usage 与 checkin 映射。
 
 在 magpie 沙箱里试（不碰自己的配置和登录）：
 

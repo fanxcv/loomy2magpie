@@ -302,6 +302,27 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
           return { error: `额度查询失败：${error.message}`, windows: [] };
         }
       },
+
+      async checkin(getAuth) {
+        const auth = await getAuth();
+        try {
+          const session = await sessionFor(auth);
+          if (!session) return { outcome: "failed", message: "账号没有可用 session" };
+          const res = await fetch(`${BASE}/points/first-login`, {
+            method: "POST",
+            headers: gatewayHeaders(session),
+            body: "{}",
+          });
+          const payload = await res.json().catch(() => null);
+          const code = payload?.code ?? payload?.errorCode;
+          if (!res.ok || (code && code !== "000000" && code !== 0 && code !== "0")) {
+            throw new Error(payload?.desc || payload?.message || `HTTP ${res.status}`);
+          }
+          return { outcome: "success", message: "每日赠送积分已刷新" };
+        } catch (error) {
+          return { outcome: "failed", message: String(error.message || error) };
+        }
+      },
     },
 
     provider: {
