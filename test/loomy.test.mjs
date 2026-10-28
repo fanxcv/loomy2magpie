@@ -334,23 +334,33 @@ describe("login flow (mocked account service)", () => {
     }
   });
 
-  test("usage maps the points record to a balance string", async () => {
+  test("usage maps the points record to a wallet window magpie can route on", async () => {
     const original = globalThis.fetch;
     globalThis.fetch = async () =>
       json({
+        code: "000000",
         data: { balance: 100, dailyBalance: 20, availableBalance: 120 },
       });
     try {
       const hooks = await LoomyAuthPlugin({ client: fakeClient });
       const usage = await hooks.auth.usage(async () => ({ type: "api", key: "S", metadata: {} }));
-      expect(usage.balance).toBe("可用 120 · 余额 100 · 每日 20 积分");
+      expect(usage.balance).toBe("120 积分");
       expect(usage.user).toBe("");
+      expect(usage.windows).toHaveLength(1);
+      const window = usage.windows[0];
+      expect(window.balance).toBe(120);
+      expect(window.unit).toBe("积分");
+      expect(window.span).toBe(86400);
+      expect(window.runsOut).toBe(20);
+      expect(Date.parse(window.resetsAt)).toBeGreaterThan(Date.now());
+      // 一个钱包窗口 = 路由知道这个账号（不再是 unknown 排在已知账号之后）
+      expect(window.used).toBeUndefined();
     } finally {
       globalThis.fetch = original;
     }
   });
 
-  test("checkin posts first-login and reports success", async () => {
+  test("checkin uses magpie's claimed outcome", async () => {
     const original = globalThis.fetch;
     let seen;
     globalThis.fetch = async (url, init) => {
@@ -360,7 +370,7 @@ describe("login flow (mocked account service)", () => {
     try {
       const hooks = await LoomyAuthPlugin({ client: fakeClient });
       const result = await hooks.auth.checkin(async () => ({ type: "api", key: "S", metadata: {} }));
-      expect(result.outcome).toBe("success");
+      expect(result.outcome).toBe("claimed");
       expect(seen.url).toBe("https://loomyad.xunfei.cn/api/v1/points/first-login");
       expect(seen.method).toBe("POST");
     } finally {

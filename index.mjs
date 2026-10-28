@@ -42,6 +42,20 @@ async function sessionFor(auth) {
   return session;
 }
 
+const DAILY_SPAN = 86400;
+
+const numOf = (value) => {
+  const n = typeof value === "string" ? Number(value.trim()) : Number(value);
+  return Number.isFinite(n) ? n : 0;
+};
+
+// Loomy 的每日赠送积分按北京日 0 点重置；magpie 的 Smart 路由按“最快重置”优先。
+function nextDailyReset(now = Date.now()) {
+  const CST = 8 * 3600 * 1000;
+  const dayStart = Math.floor((now + CST) / 86400000) * 86400000;
+  return dayStart + 86400000 - CST;
+}
+
 export const LoomyAuthPlugin = async ({ client } = {}) => {
   const log = (level, message) => {
     try {
@@ -285,18 +299,39 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
           const session = await sessionFor(auth);
           if (!session) return { error: "账号没有可用 session", windows: [] };
           const payload = await fetchPoints(session);
-          const data = payload.data || {};
-          const available = Number(data.availableBalance ?? data.available);
-          const balance = Number(data.balance);
-          const daily = Number(data.dailyBalance);
-          const parts = [];
-          if (Number.isFinite(available)) parts.push(`可用 ${available}`);
-          if (Number.isFinite(balance)) parts.push(`余额 ${balance}`);
-          if (Number.isFinite(daily)) parts.push(`每日 ${daily}`);
+          const code = String(payload?.code ?? payload?.errorCode ?? "");
+          if (code && code !== "000000" && code !== "0") {
+            const gone = code === "020002" || code === "100002";
+            return {
+              error: payload?.desc || payload?.message || `积分查询失败 (${code})`,
+              windows: [],
+              ...(gone ? { signIn: "expired" } : {}),
+            };
+          }
+          // 摘要在 data 或 data.data 两层（不同版本两种形态）
+          const data = payload?.data?.data ?? payload?.data ?? {};
+          const permanent = numOf(data.balance);
+          const daily = numOf(data.dailyBalance);
+          const available = numOf(data.availableBalance) || permanent + daily;
+          const reset = new Date(nextDailyReset()).toISOString();
           return {
             plan: "Loomy",
             user: meta.phone || auth?.accountId || "",
-            balance: parts.length ? parts.join(" · ") + " 积分" : undefined,
+            balance: `${available} 积分`,
+            // 钱包读数：路由知道这个账号，余额越多越先；span/resetsAt 让 Smart 按
+            // “最快重置”优先（每日赠送积分 0 点重置，不用就作废）。
+            windows: [
+              {
+                name: "积分",
+                balance: available,
+                unit: "积分",
+                display: `可用 ${available}（永久 ${permanent} + 每日 ${daily}）`,
+                span: DAILY_SPAN,
+                resetsAt: reset,
+                runsOutAt: reset,
+                runsOut: daily,
+              },
+            ],
           };
         } catch (error) {
           return { error: `额度查询失败：${error.message}`, windows: [] };
@@ -318,7 +353,7 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
           if (!res.ok || (code && code !== "000000" && code !== 0 && code !== "0")) {
             throw new Error(payload?.desc || payload?.message || `HTTP ${res.status}`);
           }
-          return { outcome: "success", message: "每日赠送积分已刷新" };
+          return { outcome: "claimed", message: "每日赠送积分已刷新" };
         } catch (error) {
           return { outcome: "failed", message: String(error.message || error) };
         }

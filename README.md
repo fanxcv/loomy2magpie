@@ -56,12 +56,32 @@ Loomy 没有 OAuth / 设备码授权接口。官方网页版 `https://loomy.xunf
 | `config` | 注册供应商 `loomy`，`@ai-sdk/openai-compatible`，基址 `https://loomyad.xunfei.cn/api/v1`，附 11 个兜底模型 |
 | `auth.methods` | 四种：桌面端自动导入、手机号+短信验证码、手机号+密码（keyless + authorize），或直接粘贴 session |
 | `auth.loader` | 返回 `baseURL` 和 `fetch`；每个请求注入 `Authorization: Bearer`、`token`、`traceparent`、`loomy-version` |
-| `auth.usage` | `GET /points/records` → 可用 / 余额 / 每日积分 |
+| `auth.usage` | `GET /points/records`（v2，v1 回退）→ 钱包窗口：`balance` 可用积分、`resetsAt`/`span` 北京日 0 点重置、`runsOut` 当日会作废的每日积分 |
 | `auth.checkin` | `POST /points/first-login` → 每日赠送积分刷新（按天幂等） |
 | `provider.models` | `GET /models` 动态列表，失败时沿用内置清单 |
 | 401 | 自动重登一次并重试，新 session 写回账号 |
 
 session 有效期 14 天，没有 refresh token；magpie 的 `auth.refresh` 只续期 oauth 账号，所以本插件在 loader 发现 session 将过期、以及请求 401 时自行重登。通常不需要手动重新登录。
+
+## 路由与配额
+
+Loomy 的积分是**钱包**而不是百分比配额，所以 `auth.usage` 返回一个钱包窗口：
+
+```json
+{ "name": "积分", "balance": 120, "unit": "积分",
+  "display": "可用 120（永久 100 + 每日 20）",
+  "span": 86400, "resetsAt": "<下一个北京 0 点>",
+  "runsOutAt": "<同上>", "runsOut": 20 }
+```
+
+magpie 的语义（见 `docs/reference.md`）：
+
+- 只给 `display` 的窗口“没有份额”，路由会把这个账号当作**未知**，排在已知账号之后（这正是“基本不调度”的原因）。
+- 给 `balance`（数字）+ `unit` 的窗口是钱包：路由知道这个账号，同一单位下余额多的优先。
+- 给 `span` / `resetsAt` 后，Smart 路由会按“最快重置”排序：每日 0 点重置的 Loomy 比周窗口的渠道更早重置，于是**排在前面**（不用就作废）。
+- 钱包余额为 0 时算作已用完。
+
+若你的路由组用的是 `In order` 或手写权重，那套顺序优先于 Smart；要让它自动优先，用默认 **Smart**。
 
 ## 与 loomy2api 的对应
 
@@ -79,6 +99,14 @@ session 有效期 14 天，没有 refresh token；magpie 的 `auth.refresh` 只�
 
 - **Anthropic `/v1/messages`**：magpie 网关把 agent 的任意协议转成 chat completions，再交给本插件。
 - **HTTP 代理**：插件使用宿主 fetch；需要代理时在 magpie 进程环境里配 `HTTPS_PROXY`。
+
+## 环境变量
+
+| 变量 | 默认 | 用途 |
+|---|---|---|
+| `LOOMY_BASE_URL` | `https://loomyad.xunfei.cn/api/v1` | 模型网关（须以 `/api/v1` 结尾） |
+| `LOOMY_ACCOUNT_BASE_URL` | `https://account.xfinfr.com` | 账号服务 |
+| `LOOMY_DESKTOP_DIR` | 各平台默认 | 桌面端 `Local Storage/leveldb` 目录 |
 
 ## 测试
 
