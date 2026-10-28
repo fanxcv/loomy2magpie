@@ -41,6 +41,8 @@ magpie quota
 bun scripts/session.mjs
 ```
 
+session 等同于账号凭据，勿外传。
+
 ### 能不能走网页授权登录？
 
 Loomy 没有 OAuth / 设备码授权接口。官方网页版 `https://loomy.xunfei.cn/web/` 用的是**另一套** `loomy_web_session` Cookie 和 `/web/api/...` 接口；桌面端插件用的是 `account.xfinfr.com` 登录换来的 session 和 `loomyad.xunfei.cn/api/v1`，两者不通用。所以无法一键“网页授权”后直接给本插件用；可行路径是上面的桌面端导入、短信或密码。
