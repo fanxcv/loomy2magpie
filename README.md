@@ -19,8 +19,31 @@ magpie quota
 
 | 方式 | 存什么 | 说明 |
 |---|---|---|
+| 自动导入 Loomy 桌面端登录态 | `key` = session | 读取本机 Loomy 客户端已登录的账号，无需短信；客户端重登后重新导入即可 |
+| 手机号 + 短信验证码 | `key` = session（oauth） | 输入手机号后自动发码，再输 6 位验证码；不落密码 |
 | Loomy 手机号 + 密码 | `key` = session，`metadata` = 手机号、密码、设备标识 | 会自动重登；密码以明文写进 magpie 的 `plugin-auth.json` |
 | 粘贴已有 session | `key` = session | 不落密码，14 天后需重新粘贴 |
+
+### session 从哪里来
+
+1. **最简单：用手机号 + 密码**，插件登录后自动把 14 天 session 写进 magpie，不需要手动复制。
+2. **桌面端已在用**：Loomy 是 Electron 应用，登录态以明文 JSON 存在 Chromium Local Storage 的 `loomy-auth-session` 键里：
+   - Windows `%APPDATA%\Loomy\Local Storage\leveldb\*.log`
+   - macOS `~/Library/Application Support/Loomy/Local Storage/leveldb/*.log`
+   - Linux `~/.config/Loomy/Local Storage/leveldb/*.log`
+   插件会自动读取并调 `/api/v1/models` 校验；也可用 `LOOMY_DESKTOP_DIR` 指定目录。magpie 跑在容器里时，需要把客户端的 `Local Storage/leveldb` 目录挂进容器并设 `LOOMY_DESKTOP_DIR`。
+3. **不想给密码**：用短信验证码方式，登录后同样得到 14 天 session。
+4. **已有 session**：直接粘贴；session 就是模型网关的 Bearer token。
+
+想先看一眼桌面端的 session：
+
+```bash
+bun scripts/session.mjs
+```
+
+### 能不能走网页授权登录？
+
+Loomy 没有 OAuth / 设备码授权接口。官方网页版 `https://loomy.xunfei.cn/web/` 用的是**另一套** `loomy_web_session` Cookie 和 `/web/api/...` 接口；桌面端插件用的是 `account.xfinfr.com` 登录换来的 session 和 `loomyad.xunfei.cn/api/v1`，两者不通用。所以无法一键“网页授权”后直接给本插件用；可行路径是上面的桌面端导入、短信或密码。
 
 一个供应商可以登录多次，magpie 用 `metadata.email`（这里放手机号）区分账号，并把请求分给它们。多账号、故障切换、429 冷却都由 magpie 处理。
 
@@ -43,7 +66,7 @@ session 有效期 14 天，没有 refresh token；magpie 的 `auth.refresh` 只�
 |---|---|
 | `loomy2api/signer.py` | `lib/loomy.mjs` 的 `stringToSign` / `sign` / `buildAuthHeaders` |
 | `loomy2api/crypto.py` | `lib/loomy.mjs` 的 `derToNumbers` / `rsaEncrypt`（纯 BigInt，无依赖） |
-| `loomy2api/account.py` | `lib/loomy.mjs` 的 `login` / `newIdentity` |
+| `loomy2api/account.py` | `lib/loomy.mjs` 的 `login` / `loginWithSms` / `newIdentity`；`lib/desktop.mjs` 读桌面端 leveldb |
 | `loomy2api/upstream.py` | `gatewayHeaders` / `fetchModels` / `fetchPoints` |
 | `loomy2api/server.py` | magpie 网关（协议转换、流式、错误映射） |
 | `loomy2api/pool.py` | magpie 多账号与故障切换 |

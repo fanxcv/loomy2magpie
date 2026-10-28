@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   contentMD5,
   derToNumbers,
@@ -166,17 +169,41 @@ describe("plugin hooks", () => {
     expect(await hooks.auth.loader(async () => null)).toEqual({});
   });
 
+  test("loader reads oauth access tokens too", async () => {
+    const hooks = await LoomyAuthPlugin({ client: fakeClient });
+    const loader = await hooks.auth.loader(async () => ({
+      type: "oauth",
+      access: "A1",
+      expires: Date.now() + 86400000,
+      phone: "13800138000",
+    }));
+    expect(loader.apiKey).toBe("A1");
+    expect(loader.headers.token).toBe("A1");
+  });
+
+  test("has four sign-in methods, desktop import first", async () => {
+    const hooks = await LoomyAuthPlugin({ client: fakeClient });
+    expect(hooks.auth.methods.map((m) => m.label)).toEqual([
+      "自动导入 Loomy 桌面端登录态",
+      "手机号 + 短信验证码",
+      "Loomy 手机号 + 密码",
+      "粘贴已有 session（不存密码）",
+    ]);
+  });
+
   test("paste-session method stays a plain api method", async () => {
     const hooks = await LoomyAuthPlugin({ client: fakeClient });
-    const method = hooks.auth.methods[1];
+    const method = hooks.auth.methods[3];
     expect(method.type).toBe("api");
     expect(method.authorize).toBeUndefined();
   });
 
-  test("the phone method is keyless so magpie does not ask for an API key", async () => {
+  test("the password and desktop methods are keyless so magpie does not ask for an API key", async () => {
     const hooks = await LoomyAuthPlugin({ client: fakeClient });
     expect(hooks.auth.methods[0].keyless).toBe(true);
     expect(typeof hooks.auth.methods[0].authorize).toBe("function");
+    expect(hooks.auth.methods[2].keyless).toBe(true);
+    expect(typeof hooks.auth.methods[2].authorize).toBe("function");
   });
 });
 
@@ -271,7 +298,7 @@ describe("login flow (mocked account service)", () => {
     };
     try {
       const hooks = await LoomyAuthPlugin({ client: fakeClient });
-      const result = await hooks.auth.methods[0].authorize({
+      const result = await hooks.auth.methods[2].authorize({
         phone: "13800138000",
         password: "pw",
       });
@@ -299,7 +326,7 @@ describe("login flow (mocked account service)", () => {
     globalThis.fetch = async () => json({ code: "100003", desc: "密码错误" });
     try {
       const hooks = await LoomyAuthPlugin({ client: fakeClient });
-      const result = await hooks.auth.methods[0].authorize({ phone: "1", password: "x" });
+      const result = await hooks.auth.methods[2].authorize({ phone: "1", password: "x" });
       expect(result.type).toBe("failed");
       expect(result.error).toContain("密码错误");
     } finally {
@@ -320,6 +347,92 @@ describe("login flow (mocked account service)", () => {
       expect(usage.user).toBe("");
     } finally {
       globalThis.fetch = original;
+    }
+  });
+});
+
+describe("sms and desktop import", () => {
+  const json = (obj, status = 200) =>
+    new Response(JSON.stringify(obj), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+
+  test("sms authorize sends a code and callback exchanges it for a session", async () => {
+    const original = globalThis.fetch;
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : null });
+      if (String(url).endsWith("/login/phone/sendMsgCode")) {
+        return json({ code: "000000", data: { msgid: "M-1" } });
+      }
+      if (String(url).endsWith("/login/phone/checkCode")) {
+        return json({ code: "000000", data: { session: "S-SMS", userid: "U-SMS", phone: "13800138000" } });
+      }
+      return json({ code: "404" }, 404);
+    };
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      const started = await hooks.auth.methods[1].authorize({ phone: "13800138000" });
+      expect(started.method).toBe("code");
+      expect(started.instructions).toContain("13800138000");
+
+      const result = await started.callback("123456");
+      expect(result.type).toBe("success");
+      expect(result.access).toBe("S-SMS");
+      expect(result.accountId).toBe("13800138000");
+      expect(result.expires).toBeGreaterThan(Date.now());
+
+      const check = calls.find((c) => c.url.endsWith("/login/phone/checkCode"));
+      expect(check.body.param.msgid).toBe("M-1");
+      expect(check.body.param.mcode).toBe("123456");
+      expect(check.body.param.expire).toBe(14 * 24 * 3600);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("desktop import reads the leveldb log and validates the session", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "loomy-desktop-"));
+    const payload = Buffer.from(
+      "noise loomy-auth-session " +
+        JSON.stringify({ phone: "13900139000", session: "S-DESK", userid: "U-DESK" }),
+    );
+    writeFileSync(join(dir, "000003.log"), payload);
+
+    const original = globalThis.fetch;
+    const previous = process.env.LOOMY_DESKTOP_DIR;
+    process.env.LOOMY_DESKTOP_DIR = dir;
+    let modelCalls = 0;
+    globalThis.fetch = async () => {
+      modelCalls++;
+      return json({ data: [{ id: "spark-x" }] });
+    };
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      const result = await hooks.auth.methods[0].authorize();
+      expect(result.type).toBe("success");
+      expect(result.key).toBe("S-DESK");
+      expect(result.metadata.email).toBe("13900139000");
+      expect(modelCalls).toBe(1);
+    } finally {
+      globalThis.fetch = original;
+      if (previous === undefined) delete process.env.LOOMY_DESKTOP_DIR;
+      else process.env.LOOMY_DESKTOP_DIR = previous;
+    }
+  });
+
+  test("desktop import fails cleanly when nothing is installed", async () => {
+    const previous = process.env.LOOMY_DESKTOP_DIR;
+    process.env.LOOMY_DESKTOP_DIR = mkdtempSync(join(tmpdir(), "loomy-empty-"));
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      const result = await hooks.auth.methods[0].authorize();
+      expect(result.type).toBe("failed");
+      expect(result.error).toContain("未找到");
+    } finally {
+      if (previous === undefined) delete process.env.LOOMY_DESKTOP_DIR;
+      else process.env.LOOMY_DESKTOP_DIR = previous;
     }
   });
 });

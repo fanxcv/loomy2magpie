@@ -9,26 +9,37 @@ import {
   fetchPoints,
   gatewayHeaders,
   login,
+  loginWithSms,
   newIdentity,
+  sendSmsCode,
 } from "./lib/loomy.mjs";
+import { readDesktopSession } from "./lib/desktop.mjs";
 import { FALLBACK_MODELS, mergeModels, toConfigModels } from "./lib/models.mjs";
 
 const REFRESH_LEAD = 24 * 3600 * 1000;
 
-const metaOf = (auth) =>
-  auth?.metadata && typeof auth.metadata === "object" ? auth.metadata : {};
-const keyOf = (auth) => (typeof auth?.key === "string" ? auth.key : "");
-const stale = (meta) =>
-  !meta.obtainedAt || Date.now() - Number(meta.obtainedAt) > SESSION_TTL - REFRESH_LEAD;
+const metaOf = (auth) => {
+  const meta = auth?.metadata && typeof auth.metadata === "object" ? auth.metadata : {};
+  return auth?.phone ? { ...meta, phone: auth.phone } : meta;
+};
+const keyOf = (auth) =>
+  typeof auth?.key === "string" ? auth.key : typeof auth?.access === "string" ? auth.access : "";
+const stale = (auth) => {
+  if (typeof auth?.expires === "number" && auth.expires > 0) {
+    return Date.now() > auth.expires - REFRESH_LEAD;
+  }
+  const meta = metaOf(auth);
+  return !meta.obtainedAt || Date.now() - Number(meta.obtainedAt) > SESSION_TTL - REFRESH_LEAD;
+};
 
 async function sessionFor(auth) {
-  const key = keyOf(auth);
+  const session = keyOf(auth);
   const meta = metaOf(auth);
-  if (key && !stale(meta)) return key;
+  if (session && !stale(auth)) return session;
   if (meta.phone && meta.password) {
     return (await login(meta.phone, meta.password, meta.identity)).session;
   }
-  return key;
+  return session;
 }
 
 export const LoomyAuthPlugin = async ({ client } = {}) => {
@@ -41,17 +52,20 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
   };
 
   const save = async (auth, got, meta) => {
-    const body = {
-      ...(auth && typeof auth === "object" ? auth : {}),
-      type: "api",
-      key: got.session,
-      metadata: {
-        ...meta,
-        userId: got.userid || meta.userId,
-        identity: got.identity || meta.identity,
-        obtainedAt: Date.now(),
-      },
-    };
+    const body =
+      auth?.type === "oauth"
+        ? { ...auth, access: got.session, expires: Date.now() + SESSION_TTL }
+        : {
+            ...(auth && typeof auth === "object" ? auth : {}),
+            type: "api",
+            key: got.session,
+            metadata: {
+              ...meta,
+              userId: got.userid || meta.userId,
+              identity: got.identity || meta.identity,
+              obtainedAt: Date.now(),
+            },
+          };
     try {
       await client?.auth?.set?.({ path: { id: PROVIDER }, body });
     } catch (error) {
@@ -74,6 +88,85 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
       provider: PROVIDER,
 
       methods: [
+        {
+          type: "api",
+          label: "自动导入 Loomy 桌面端登录态",
+          keyless: true,
+          async authorize() {
+            const found = readDesktopSession();
+            if (!found) {
+              return {
+                type: "failed",
+                error: "未找到本机 Loomy 桌面端登录态；请先在 Loomy 客户端登录，或改用短信/密码/粘贴 session",
+              };
+            }
+            try {
+              await fetchModels(found.session);
+            } catch (error) {
+              return {
+                type: "failed",
+                error: `桌面端 session 校验失败（可能已过期或网络不通）：${error.message}`,
+              };
+            }
+            return {
+              type: "success",
+              key: found.session,
+              metadata: {
+                email: found.phone || undefined,
+                phone: found.phone || "",
+                userId: found.userid || "",
+                source: "desktop",
+                obtainedAt: Date.now(),
+              },
+            };
+          },
+        },
+        {
+          type: "oauth",
+          label: "手机号 + 短信验证码",
+          prompts: [
+            {
+              type: "text",
+              key: "phone",
+              message: "Loomy 手机号",
+              placeholder: "13800138000",
+              validate: (v) => (String(v || "").trim() ? undefined : "请输入手机号"),
+            },
+          ],
+          async authorize(inputs) {
+            const phone = String(inputs?.phone || "").trim();
+            if (!phone) return { type: "failed", error: "请输入手机号" };
+            let sent;
+            try {
+              sent = await sendSmsCode(phone);
+            } catch (error) {
+              return { type: "failed", error: String(error.message || error).slice(0, 500) };
+            }
+            const msgid = sent?.data?.msgid || sent?.msgid || "";
+            if (!msgid) return { type: "failed", error: "发送验证码失败：上游未返回 msgid" };
+            return {
+              url: "",
+              instructions: `验证码已发到 ${phone}，请输入 6 位短信验证码`,
+              method: "code",
+              async callback(code) {
+                try {
+                  const got = await loginWithSms(phone, String(code || "").trim(), msgid, newIdentity());
+                  return {
+                    type: "success",
+                    access: got.session,
+                    refresh: "",
+                    expires: Date.now() + SESSION_TTL,
+                    accountId: got.phone || phone,
+                    uid: got.userid || undefined,
+                    phone,
+                  };
+                } catch (error) {
+                  return { type: "failed", error: String(error.message || error).slice(0, 500) };
+                }
+              },
+            };
+          },
+        },
         {
           type: "api",
           label: "Loomy 手机号 + 密码",
@@ -129,7 +222,6 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
         const meta = metaOf(auth);
         const state = {
           auth,
-          meta,
           session: keyOf(auth),
           retried: false,
           pending: null,
@@ -149,7 +241,7 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
           return state.pending;
         };
 
-        if (meta.phone && meta.password && (!state.session || stale(meta))) {
+        if (meta.phone && meta.password && (!state.session || stale(auth))) {
           try {
             await relogin();
           } catch (error) {
