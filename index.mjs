@@ -91,7 +91,7 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
     config: async (cfg) => {
       cfg.provider ??= {};
       cfg.provider[PROVIDER] ??= {
-        name: "Loomy（讯飞）",
+        name: "讯飞Loomy",
         npm: "@ai-sdk/openai-compatible",
         api: BASE,
         models: toConfigModels(FALLBACK_MODELS),

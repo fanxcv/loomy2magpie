@@ -1,6 +1,6 @@
 # opencode-loomy-auth
 
-把 **Loomy（讯飞）** 账号变成 magpie / OpenCode 的一个供应商：手机号+密码、手机号+短信、桌面端登录态导入或粘贴 session，拿到 14 天 session，替 agent 发 OpenAI 兼容请求。
+把 **讯飞Loomy** 账号变成 magpie / OpenCode 的一个供应商：手机号+密码、手机号+短信、桌面端登录态导入或粘贴 session，拿到 14 天 session，替 agent 发 OpenAI 兼容请求。
 
 本包是 [loomy2api](https://github.com/Patrick130306/loomy2api) 的插件化移植：只保留账号服务签名、密码 RSA 加密、session 管理与模型网关请求头。HTTP 网关、账号池、失败切换、限流、面板、Anthropic 协议转换都由 magpie 自带，不再重复实现。
 
@@ -140,7 +140,7 @@ npm publish
 ```json
 {
   "package": "opencode-loomy-auth",
-  "name": "Loomy",
+  "name": "讯飞Loomy",
   "providers": ["loomy"],
   "summary": {
     "en": "Loomy (iFlytek) coding plan through your phone number.",
@@ -148,6 +148,10 @@ npm publish
   }
 }
 ```
+
+## 图标
+
+供应商图标写在 `package.json` 的 `magpie.icon`（data URI，magpie 读一次即存本地，不依赖外链）：取自 Loomy 官网 `https://loomy.xunfei.cn/icon.png`，128×128、96 色量化后内嵌，约 4.8 KB。换图重跑：下载原图 → `resize((128,128), LANCZOS)` → `quantize(colors=96)` → base64。
 
 ## License
 
