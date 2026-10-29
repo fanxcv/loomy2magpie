@@ -806,10 +806,11 @@ describe("desktop renewal", () => {
       expect(got).toMatchObject({
         access: "S-NEW",
         refresh: "",
-        source: "desktop",
         phone: "13900139000",
         userId: "U-NEW",
       });
+      // 不带 source：host 用 {...was, ...fields} 合并，原有 source 得以保留。
+      expect(got.source).toBeUndefined();
       expect(got.expires).toBe(loggedInAt + SESSION_TTL);
     } finally {
       if (previous === undefined) delete process.env.LOOMY_DESKTOP_DIR;
@@ -846,5 +847,26 @@ describe("desktop renewal", () => {
         metadata: { phone: "13800138000", password: "pw" },
       }),
     ).toBeUndefined();
+  });
+
+  // 短信账号没有 refresh token，但本机桌面端登录的是同一个手机号时，可以借它的 session。
+  test("refresh borrows a desktop session for the same phone", async () => {
+    const previous = process.env.LOOMY_DESKTOP_DIR;
+    process.env.LOOMY_DESKTOP_DIR = desktopDir({
+      phone: "13800138000",
+      session: "S-DESKTOP",
+      loggedInAt: Date.now(),
+    });
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      const sms = { type: "oauth", access: "S-SMS", refresh: "", phone: "13800138000" };
+      expect((await hooks.auth.refresh(sms)).access).toBe("S-DESKTOP");
+      // 手机号不是这一个的账号不借
+      expect(await hooks.auth.refresh({ ...sms, phone: "13700137000" })).toBeUndefined();
+      expect(await hooks.auth.refresh({ ...sms, accountId: "13700137000" })).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.LOOMY_DESKTOP_DIR;
+      else process.env.LOOMY_DESKTOP_DIR = previous;
+    }
   });
 });

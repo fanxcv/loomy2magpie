@@ -20,7 +20,7 @@ magpie quota
 | 方式 | 存什么 | 说明 |
 |---|---|---|
 | 自动导入 Loomy 桌面端登录态 | `type` = oauth，`access` = session | 读取本机 Loomy 客户端已登录的账号，无需短信；magpie 到期前通过 `auth.refresh` 重新读客户端登录态，客户端重登后自动换成新 session |
-| 手机号 + 短信验证码 | `type` = oauth，`access` = session | 输入手机号后自动发码，再输 6 位验证码；不落密码，没有可续的 refresh token |
+| 手机号 + 短信验证码 | `type` = oauth，`access` = session | 输入手机号后自动发码，再输 6 位验证码；不落密码，Loomy 无 refresh token。本机（或挂载进来的）桌面端登录同一手机号时，可借其 session 续期 |
 | Loomy 手机号 + 密码 | `type` = api，`key` = session，`metadata` = 手机号、密码、设备标识 | 临近过期或请求 401/403 时自动重登；密码以明文写进 magpie 的 `plugin-auth.json` |
 | 粘贴已有 session | `type` = api，`key` = session | 不落密码，14 天后需重新粘贴 |
 
@@ -63,7 +63,7 @@ Loomy 没有标准 OAuth / 设备码授权接口（本插件里的 `type` = oaut
 | `provider.models` | `GET /models` 动态列表，映射成宿主 GUI 形状（`capabilities`、`rate`/`free`），失败时沿用内置清单；session 失效错误码 `020002`/`100002` 会抛 `signIn: "expired"` |
 | 401/403 | 有密码时自动重登一次并重试，新 session 写回账号；没有可用重登时标出需要重新登录 |
 
-session 有效期 14 天，Loomy 没有 refresh token。桌面端导入按 oauth 保存并实现 `auth.refresh`：到期前重新读桌面端登录态，客户端重登过就自动续上。短信和粘贴的账号没有可续凭据，14 天后需重新登录；密码账号按 api 保存，在临近过期和请求 401/403 时用密码重登。没有密码可重登的账号，loader 会把首次 401/403 的响应加上 `X-Magpie-Sign-In: expired`，`provider.models` 遇到 session 失效错误码也会抛 `signIn: "expired"`，让 magpie 标记账号。通常不需要手动重新登录。
+session 有效期 14 天，Loomy 没有 refresh token。桌面端导入按 oauth 保存并实现 `auth.refresh`：到期前重新读桌面端登录态，客户端重登过就自动续上。短信账号没有密码可重登，但若本机桌面端登录的是同一个手机号，`auth.refresh` 会借用桌面端的 session 续期；借不到就只能重新短信登录。粘贴的账号没有可续凭据，14 天后需重新粘贴。密码账号按 api 保存，在临近过期和请求 401/403 时用密码重登。没有密码可重登的账号，loader 会把首次 401/403 的响应加上 `X-Magpie-Sign-In: expired`，`provider.models` 遇到 session 失效错误码也会抛 `signIn: "expired"`，让 magpie 标记账号。通常不需要手动重新登录。
 
 ## 路由与配额
 

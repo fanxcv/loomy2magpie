@@ -113,18 +113,20 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
       refreshLead: REFRESH_LEAD,
 
       // 桌面端登录态是 oauth：到期前重新读 leveldb，客户端重登后自动换上
-      // 新 session；其他账号没有可续的凭据。
+      // 新 session；短信/粘贴的账号没有 refresh token，只有本机桌面端登录的
+      // 是同一个手机号时才能借它的 session 续期。
       async refresh(auth) {
-        if (auth?.source !== "desktop") return undefined;
         const found = readDesktopSession();
-        if (!found || !found.session || found.session === auth.access) return undefined;
+        if (!found?.session || found.session === auth?.access) return undefined;
+        const mine = String(auth?.accountId || auth?.phone || "").trim();
+        const theirs = String(found.phone || "").trim();
+        if (auth?.source !== "desktop" && (!mine || mine !== theirs)) return undefined;
         return {
           access: found.session,
           refresh: "",
           expires: (Number(found.loggedInAt) || Date.now()) + SESSION_TTL,
           phone: found.phone || "",
           userId: found.userid || "",
-          source: "desktop",
           obtainedAt: Date.now(),
         };
       },
