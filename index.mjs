@@ -49,6 +49,16 @@ const numOf = (value) => {
   return Number.isFinite(n) ? n : 0;
 };
 
+// 与 numOf 不同：缺失/非数字返回 undefined，好让合法的 0 不被 `||` 吞掉。
+const maybeNum = (value) => {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string" && value.trim() === "") return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+};
+
+const signInExpired = (code) => code === "020002" || code === "100002";
+
 // Loomy 的每日赠送积分按北京日 0 点重置；magpie 的 Smart 路由按“最快重置”优先。
 function nextDailyReset(now = Date.now()) {
   const CST = 8 * 3600 * 1000;
@@ -100,6 +110,24 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
 
     auth: {
       provider: PROVIDER,
+      refreshLead: REFRESH_LEAD,
+
+      // 桌面端登录态是 oauth：到期前重新读 leveldb，客户端重登后自动换上
+      // 新 session；其他账号没有可续的凭据。
+      async refresh(auth) {
+        if (auth?.source !== "desktop") return undefined;
+        const found = readDesktopSession();
+        if (!found || !found.session || found.session === auth.access) return undefined;
+        return {
+          access: found.session,
+          refresh: "",
+          expires: (Number(found.loggedInAt) || Date.now()) + SESSION_TTL,
+          phone: found.phone || "",
+          userId: found.userid || "",
+          source: "desktop",
+          obtainedAt: Date.now(),
+        };
+      },
 
       methods: [
         {
@@ -124,14 +152,15 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
             }
             return {
               type: "success",
-              key: found.session,
-              metadata: {
-                email: found.phone || undefined,
-                phone: found.phone || "",
-                userId: found.userid || "",
-                source: "desktop",
-                obtainedAt: Date.now(),
-              },
+              access: found.session,
+              // host 的 save() 以 "refresh" in result 判定 oauth，空串也算。
+              refresh: "",
+              expires: (Number(found.loggedInAt) || Date.now()) + SESSION_TTL,
+              source: "desktop",
+              accountId: found.phone || undefined,
+              phone: found.phone || "",
+              userId: found.userid || "",
+              obtainedAt: Date.now(),
             };
           },
         },
@@ -273,19 +302,33 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
           return fetch(input, { ...init, headers });
         };
 
+        // 没有密码可重登（或重登失败）时告诉宿主这账号需要重新登录；
+        // body 保持原流，不在这里读走。
+        const expired = (response) => {
+          const headers = new Headers(response.headers);
+          headers.set("X-Magpie-Sign-In", "expired");
+          return new Response(response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers,
+          });
+        };
+
         return {
           baseURL: BASE,
           apiKey: state.session,
           headers: gatewayHeaders(state.session),
           async fetch(input, init) {
             let response = await send(input, init, state.session);
-            if (response.status === 401 && !state.retried && meta.phone && meta.password) {
+            if ((response.status === 401 || response.status === 403) && !state.retried) {
+              if (!meta.phone || !meta.password) return expired(response);
               state.retried = true;
               try {
                 const session = await relogin();
                 response = await send(input, init, session);
               } catch (error) {
                 log("warn", `session 失效后重登失败：${error.message}`);
+                return expired(response);
               }
             }
             return response;
@@ -301,7 +344,7 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
           const payload = await fetchPoints(session);
           const code = String(payload?.code ?? payload?.errorCode ?? "");
           if (code && code !== "000000" && code !== "0") {
-            const gone = code === "020002" || code === "100002";
+            const gone = signInExpired(code);
             return {
               error: payload?.desc || payload?.message || `积分查询失败 (${code})`,
               windows: [],
@@ -312,10 +355,10 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
           const data = payload?.data?.data ?? payload?.data ?? {};
           const permanent = numOf(data.balance);
           const daily = numOf(data.dailyBalance);
-          const available = numOf(data.availableBalance) || permanent + daily;
+          const available = maybeNum(data.availableBalance) ?? permanent + daily;
           const reset = new Date(nextDailyReset()).toISOString();
           return {
-            plan: "Loomy",
+            plan: data.planName || data.plan || data.vipName || "",
             user: meta.phone || auth?.accountId || "",
             balance: `${available} 积分`,
             // 钱包读数：路由知道这个账号，余额越多越先；span/resetsAt 让 Smart 按
@@ -347,18 +390,25 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
             method: "POST",
             headers: gatewayHeaders(session),
             body: "{}",
+            signal: AbortSignal.timeout(20_000),
           });
           const payload = await res.json().catch(() => null);
           const code = payload?.code ?? payload?.errorCode;
-          if (!res.ok || (code && code !== "000000" && code !== 0 && code !== "0")) {
-            throw new Error(payload?.desc || payload?.message || `HTTP ${res.status}`);
+          const message = payload?.desc || payload?.message || `HTTP ${res.status}`;
+          const until = new Date(nextDailyReset()).toISOString();
+          const ok = res.ok && (!code || code === "000000" || code === 0 || code === "0");
+          if (!ok) {
+            if (/已签到|重复|already|repeat/i.test(message)) {
+              return { outcome: "done", message, until };
+            }
+            return { outcome: "failed", message };
           }
           // until 告诉 magpie 何时再来问：北京日 0 点，与 usage 的重置窗口一致。
           // 不给 until 时，magpie 当天失败后不再重试，签到页会一直挂着旧结果。
           return {
             outcome: "claimed",
             message: "每日赠送积分已刷新",
-            until: new Date(nextDailyReset()).toISOString(),
+            until,
           };
         } catch (error) {
           return { outcome: "failed", message: String(error.message || error) };
@@ -379,8 +429,15 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
         if (!session) return base;
         try {
           const payload = await fetchModels(session);
+          const code = String(payload?.code ?? payload?.errorCode ?? "");
+          if (signInExpired(code)) {
+            const error = new Error(payload?.desc || payload?.message || `session 失效 (${code})`);
+            error.signIn = "expired";
+            throw error;
+          }
           return mergeModels(base, payload.data || payload.models || []);
         } catch (error) {
+          if (error.signIn === "expired") throw error;
           log("warn", `拉取模型列表失败，沿用内置清单：${error.message}`);
           return base;
         }

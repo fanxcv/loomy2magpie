@@ -19,10 +19,10 @@ magpie quota
 
 | 方式 | 存什么 | 说明 |
 |---|---|---|
-| 自动导入 Loomy 桌面端登录态 | `key` = session | 读取本机 Loomy 客户端已登录的账号，无需短信；客户端重登后重新导入即可 |
-| 手机号 + 短信验证码 | `key` = session（oauth） | 输入手机号后自动发码，再输 6 位验证码；不落密码 |
-| Loomy 手机号 + 密码 | `key` = session，`metadata` = 手机号、密码、设备标识 | 会自动重登；密码以明文写进 magpie 的 `plugin-auth.json` |
-| 粘贴已有 session | `key` = session | 不落密码，14 天后需重新粘贴 |
+| 自动导入 Loomy 桌面端登录态 | `type` = oauth，`access` = session | 读取本机 Loomy 客户端已登录的账号，无需短信；magpie 到期前通过 `auth.refresh` 重新读客户端登录态，客户端重登后自动换成新 session |
+| 手机号 + 短信验证码 | `type` = oauth，`access` = session | 输入手机号后自动发码，再输 6 位验证码；不落密码，没有可续的 refresh token |
+| Loomy 手机号 + 密码 | `type` = api，`key` = session，`metadata` = 手机号、密码、设备标识 | 临近过期或请求 401/403 时自动重登；密码以明文写进 magpie 的 `plugin-auth.json` |
+| 粘贴已有 session | `type` = api，`key` = session | 不落密码，14 天后需重新粘贴 |
 
 ### session 从哪里来
 
@@ -31,7 +31,7 @@ magpie quota
    - Windows `%APPDATA%\Loomy\Local Storage\leveldb\*.log`
    - macOS `~/Library/Application Support/Loomy/Local Storage/leveldb/*.log`
    - Linux `~/.config/Loomy/Local Storage/leveldb/*.log`
-   插件会自动读取并调 `/api/v1/models` 校验；也可用 `LOOMY_DESKTOP_DIR` 指定目录。magpie 跑在容器里时，需要把客户端的 `Local Storage/leveldb` 目录挂进容器并设 `LOOMY_DESKTOP_DIR`。
+   插件会自动读取并调 `/api/v1/models` 校验；也可用 `LOOMY_DESKTOP_DIR` 指定目录。读到的登录态按 oauth 保存（`source` = `desktop`），到期前 magpie 会再读一次客户端登录态：只要客户端已经重新登录，就自动换上新的 session，不用重新导入。客户端登录态里若只有打码手机号（`maskedPhone`），插件不会把它当账号手机号，只保留 session 本身。magpie 跑在容器里时，需要把客户端的 `Local Storage/leveldb` 目录挂进容器并设 `LOOMY_DESKTOP_DIR`。
 3. **不想给密码**：用短信验证码方式，登录后同样得到 14 天 session。
 4. **已有 session**：直接粘贴；session 就是模型网关的 Bearer token。
 
@@ -45,23 +45,25 @@ session 等同于账号凭据，勿外传。
 
 ### 能不能走网页授权登录？
 
-Loomy 没有 OAuth / 设备码授权接口。官方网页版 `https://loomy.xunfei.cn/web/` 用的是**另一套** `loomy_web_session` Cookie 和 `/web/api/...` 接口；桌面端插件用的是 `account.xfinfr.com` 登录换来的 session 和 `loomyad.xunfei.cn/api/v1`，两者不通用。所以无法一键“网页授权”后直接给本插件用；可行路径是上面的桌面端导入、短信或密码。
+Loomy 没有标准 OAuth / 设备码授权接口（本插件里的 `type` = oauth 只是 magpie 的账号存储类型，便于到期续期，不是 OAuth 协议）。官方网页版 `https://loomy.xunfei.cn/web/` 用的是**另一套** `loomy_web_session` Cookie 和 `/web/api/...` 接口；桌面端插件用的是 `account.xfinfr.com` 登录换来的 session 和 `loomyad.xunfei.cn/api/v1`，两者不通用。所以无法一键“网页授权”后直接给本插件用；可行路径是上面的桌面端导入、短信或密码。
 
-一个供应商可以登录多次，magpie 用 `metadata.email`（这里放手机号）区分账号，并把请求分给它们。多账号、故障切换、429 冷却都由 magpie 处理。
+一个供应商可以登录多次，magpie 用账号 id（oauth 的 `accountId`，api 的 `metadata.email`；这里都放手机号）区分账号，并把请求分给它们。多账号、故障切换、429 冷却都由 magpie 处理。
 
 ## 它做了什么
 
 | 钩子 | 行为 |
 |---|---|
 | `config` | 注册供应商 `loomy`，`@ai-sdk/openai-compatible`，基址 `https://loomyad.xunfei.cn/api/v1`，附 11 个兜底模型 |
-| `auth.methods` | 四种：桌面端自动导入、手机号+短信验证码、手机号+密码（keyless + authorize），或直接粘贴 session |
-| `auth.loader` | 返回 `baseURL` 和 `fetch`；每个请求注入 `Authorization: Bearer`、`token`、`traceparent`、`loomy-version` |
-| `auth.usage` | `GET /points/records`（v2，v1 回退）→ 钱包窗口：`balance` 可用积分、`resetsAt`/`span` 北京日 0 点重置、`runsOut` 当日会作废的每日积分 |
-| `auth.checkin` | `POST /points/first-login` → 每日赠送积分刷新（按天幂等），回报 `until` = 北京日 0 点 |
-| `provider.models` | `GET /models` 动态列表，失败时沿用内置清单 |
-| 401 | 自动重登一次并重试，新 session 写回账号 |
+| `auth.methods` | 四种：桌面端自动导入（oauth）、手机号+短信验证码、手机号+密码（keyless + authorize），或直接粘贴 session |
+| `auth.loader` | 返回 `baseURL` 和 `fetch`；每个请求注入 `Authorization: Bearer`、`token`、`traceparent`、`loomy-version`；没有密码可重登时，首次 401/403 的响应带 `X-Magpie-Sign-In: expired` |
+| `auth.refresh` | 桌面端导入的 oauth 账号到期前重新读客户端登录态，客户端重登后返回新 session；其他账号返回 `undefined` |
+| `auth.refreshLead` | 24 小时：magpie 在 session 到期前这么久开始尝试续期 |
+| `auth.usage` | `GET /points/records`（v2，v1 回退）→ 钱包窗口：`balance` 可用积分、`resetsAt`/`span` 北京日 0 点重置、`runsOut` 当日会作废的每日积分；`plan` 取上游返回的套餐名 |
+| `auth.checkin` | `POST /points/first-login` → 每日赠送积分刷新（按天幂等），回报 `until` = 北京日 0 点；已签到返回 `done` |
+| `provider.models` | `GET /models` 动态列表，映射成宿主 GUI 形状（`capabilities`、`rate`/`free`），失败时沿用内置清单；session 失效错误码 `020002`/`100002` 会抛 `signIn: "expired"` |
+| 401/403 | 有密码时自动重登一次并重试，新 session 写回账号；没有可用重登时标出需要重新登录 |
 
-session 有效期 14 天，没有 refresh token；magpie 的 `auth.refresh` 只续期 oauth 账号，所以本插件在 loader 发现 session 将过期、以及请求 401 时自行重登。通常不需要手动重新登录。
+session 有效期 14 天，Loomy 没有 refresh token。桌面端导入按 oauth 保存并实现 `auth.refresh`：到期前重新读桌面端登录态，客户端重登过就自动续上。短信和粘贴的账号没有可续凭据，14 天后需重新登录；密码账号按 api 保存，在临近过期和请求 401/403 时用密码重登。没有密码可重登的账号，loader 会把首次 401/403 的响应加上 `X-Magpie-Sign-In: expired`，`provider.models` 遇到 session 失效错误码也会抛 `signIn: "expired"`，让 magpie 标记账号。通常不需要手动重新登录。
 
 ## 路由与配额
 
@@ -114,7 +116,7 @@ magpie 的语义（见 `docs/reference.md`）：
 bun test
 ```
 
-测试覆盖：签名黄金向量、RSA/PKCS#1 v1.5 与 Python 端口逐字节一致、登录请求形状、401 重登、短信/桌面导入、模型映射、usage 与 checkin 映射。
+测试覆盖：签名黄金向量、RSA/PKCS#1 v1.5 与 Python 端口逐字节一致、登录请求形状、401/403 重登与过期标记、短信/桌面导入与 oauth 续期、两种模型形状与倍率、usage 与 checkin 映射、控制面超时。
 
 在 magpie 沙箱里试（不碰自己的配置和登录）：
 

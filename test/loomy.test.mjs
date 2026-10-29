@@ -5,14 +5,25 @@ import { join } from "node:path";
 import {
   contentMD5,
   derToNumbers,
+  fetchModels,
+  fetchPoints,
   gatewayHeaders,
+  login,
+  newIdentity,
   rsaEncrypt,
+  SESSION_TTL,
   sign,
   stringToSign,
 } from "../lib/loomy.mjs";
-import { FALLBACK_MODELS, mergeModels, toConfigModels } from "../lib/models.mjs";
+import {
+  FALLBACK_MODELS,
+  mergeModels,
+  toConfigModel,
+  toConfigModels,
+  toHookModel,
+} from "../lib/models.mjs";
+import { readDesktopSession } from "../lib/desktop.mjs";
 import { LoomyAuthPlugin } from "../index.mjs";
-import { login, newIdentity } from "../lib/loomy.mjs";
 
 // 与 loomy2api/tests/test_signer.py、test_crypto.py 相同的黄金向量。
 const REAL_PUKEY = [
@@ -25,6 +36,15 @@ const fakeClient = {
   auth: { set: async () => ({ data: {} }) },
   app: { log: () => ({ data: {} }) },
 };
+
+function desktopDir(value) {
+  const dir = mkdtempSync(join(tmpdir(), "loomy-desktop-"));
+  writeFileSync(
+    join(dir, "000003.log"),
+    Buffer.from("noise loomy-auth-session " + JSON.stringify(value)),
+  );
+  return dir;
+}
 
 describe("signer", () => {
   test("stringToSign is nine lines", () => {
@@ -125,19 +145,99 @@ describe("gateway headers", () => {
 });
 
 describe("model catalogue", () => {
-  test("fallback models map to magpie shape", () => {
+  test("fallback models map to the OpenCode config shape", () => {
     const models = toConfigModels(FALLBACK_MODELS);
     expect(models["deepseek-v4-flash-0731"].limit.context).toBe(1048576);
     expect(models["mimo-v2.5"].attachment).toBe(true);
     expect(models["spark-x"].attachment).toBe(false);
+    expect(models["mimo-v2.5"].tool_call).toBe(true);
+    expect(models["mimo-v2.5"].modalities.input).toEqual(["text", "image", "audio", "video"]);
+  });
+
+  test("toConfigModel keeps the OpenCode fields", () => {
+    const model = toConfigModel({
+      id: "m",
+      name: "M",
+      context_length: 1000,
+      max_output_tokens: 200,
+      reasoning: true,
+      tool_call: false,
+      modalities: ["text", "image"],
+    });
+    expect(model).toMatchObject({
+      id: "m",
+      name: "M",
+      limit: { context: 1000, output: 200 },
+      reasoning: true,
+      tool_call: false,
+      attachment: true,
+      modalities: { input: ["text", "image"], output: ["text"] },
+    });
+  });
+
+  test("hook models strip the points multiplier into rate", () => {
+    const model = toHookModel({
+      id: "spark-x",
+      name: "Spark X2.5 (x0.1)",
+      context_length: 1048576,
+      modalities: ["text"],
+    });
+    expect(model.name).toBe("Spark X2.5");
+    expect(model.rate).toBe(0.1);
+    expect(model.free).toBeUndefined();
+    expect(model.limit.context).toBe(1048576);
+    expect(model.capabilities.toolcall).toBe(true);
+  });
+
+  test("a zero multiplier is free and leaves no rate", () => {
+    const model = toHookModel({ id: "free", name: "Free Model (x0.00)" });
+    expect(model.name).toBe("Free Model");
+    expect(model.free).toBe(true);
+    expect(model.rate).toBeUndefined();
+  });
+
+  test("modalities fill the GUI capabilities", () => {
+    const model = toHookModel({
+      id: "mimo-v2.5",
+      name: "MiMo V2.5 (x3.3)",
+      modalities: ["text", "image", "audio"],
+    });
+    expect(model.capabilities.input).toEqual({
+      text: true,
+      image: true,
+      audio: true,
+      video: false,
+      pdf: false,
+    });
+    expect(model.capabilities.output).toEqual({ text: true });
+  });
+
+  test("hook models keep the base fields and inherit its reasoning", () => {
+    const base = {
+      api: { npm: "@ai-sdk/openai-compatible", url: "https://x", id: "m" },
+      cost: { input: 0, output: 0 },
+      variants: { low: { reasoningEffort: "low" } },
+      limit: { context: 1, output: 2 },
+      capabilities: { reasoning: true, input: { text: true } },
+    };
+    const model = toHookModel({ id: "m", name: "M (x2.0)" }, base);
+    expect(model.api).toEqual(base.api);
+    expect(model.cost).toEqual(base.cost);
+    expect(model.variants).toEqual(base.variants);
+    expect(model.capabilities.reasoning).toBe(true);
+    expect(model.rate).toBe(2);
   });
 
   test("upstream list is authoritative but keeps the base shape", () => {
     const base = toConfigModels(FALLBACK_MODELS);
-    const merged = mergeModels(base, [{ id: "spark-x", name: "Spark X2.5" }]);
+    const merged = mergeModels(base, [
+      { id: "spark-x", name: "Spark X2.5 (x0.1)", modalities: ["text", "image"] },
+    ]);
     expect(Object.keys(merged)).toEqual(["spark-x"]);
     expect(merged["spark-x"].name).toBe("Spark X2.5");
+    expect(merged["spark-x"].rate).toBe(0.1);
     expect(merged["spark-x"].limit.context).toBe(1048576);
+    expect(merged["spark-x"].capabilities.input.image).toBe(true);
   });
 
   test("empty upstream result falls back to the provided list", () => {
@@ -180,6 +280,31 @@ describe("plugin hooks", () => {
     expect(loader.apiKey).toBe("A1");
     expect(loader.headers.token).toBe("A1");
   });
+
+  test("auth declares a 24h renewal lead", async () => {
+    const hooks = await LoomyAuthPlugin({ client: fakeClient });
+    expect(hooks.auth.refreshLead).toBe(24 * 3600 * 1000);
+  });
+
+  for (const status of [401, 403]) {
+    test(`a ${status} with no password to re-login is marked expired`, async () => {
+      const original = globalThis.fetch;
+      globalThis.fetch = async () => new Response("upstream body", { status });
+      try {
+        const hooks = await LoomyAuthPlugin({ client: fakeClient });
+        const loader = await hooks.auth.loader(async () => ({ type: "api", key: "S" }));
+        const response = await loader.fetch("https://loomyad.xunfei.cn/api/v1/chat/completions", {
+          method: "POST",
+          body: "{}",
+        });
+        expect(response.status).toBe(status);
+        expect(response.headers.get("X-Magpie-Sign-In")).toBe("expired");
+        expect(await response.text()).toBe("upstream body");
+      } finally {
+        globalThis.fetch = original;
+      }
+    });
+  }
 
   test("has four sign-in methods, desktop import first", async () => {
     const hooks = await LoomyAuthPlugin({ client: fakeClient });
@@ -281,8 +406,74 @@ describe("login flow (mocked account service)", () => {
         body: "{}",
       });
       expect(response.status).toBe(200);
+      expect(response.headers.get("X-Magpie-Sign-In")).toBeNull();
       expect(logins).toBe(1);
       expect(gatewayCalls).toBe(2);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("control-plane requests time out while the gateway fetch keeps streaming", async () => {
+    const original = globalThis.fetch;
+    const signals = [];
+    globalThis.fetch = async (url, init) => {
+      signals.push(init?.signal);
+      if (String(url).endsWith("/getPuKey")) {
+        return json({ code: "000000", data: { pukey: REAL_PUKEY, rcode: "" } });
+      }
+      if (String(url).endsWith("/byPwd")) {
+        return json({ code: "000000", data: { session: "S" } });
+      }
+      if (String(url).endsWith("/models")) return json({ data: [] });
+      if (String(url).includes("/points/records")) return json({ code: "000000", data: {} });
+      return json({ code: "000000" });
+    };
+    try {
+      await login("1", "pw", newIdentity());
+      await fetchModels("S");
+      await fetchPoints("S");
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      await hooks.auth.checkin(async () => ({ type: "api", key: "S", metadata: {} }));
+      expect(signals).toHaveLength(5);
+      expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+
+      let gatewaySignal = "unset";
+      globalThis.fetch = async (_url, init) => {
+        gatewaySignal = init?.signal;
+        return new Response("", { status: 200 });
+      };
+      const loader = await hooks.auth.loader(async () => ({ type: "api", key: "S" }));
+      await loader.fetch("https://loomyad.xunfei.cn/api/v1/chat/completions", { body: "{}" });
+      expect(gatewaySignal).toBeUndefined();
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("a failed re-login marks the response as expired", async () => {
+    const original = globalThis.fetch;
+    let gatewayCalls = 0;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes("account.xfinfr.com")) return json({ code: "100003", desc: "密码错误" });
+      gatewayCalls++;
+      return new Response("nope", { status: 401 });
+    };
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      const auth = {
+        type: "api",
+        key: "S-OLD",
+        metadata: { phone: "13800138000", password: "wrong", obtainedAt: Date.now() },
+      };
+      const loader = await hooks.auth.loader(async () => auth);
+      const response = await loader.fetch("https://loomyad.xunfei.cn/api/v1/chat/completions", {
+        method: "POST",
+        body: "{}",
+      });
+      expect(response.status).toBe(401);
+      expect(response.headers.get("X-Magpie-Sign-In")).toBe("expired");
+      expect(gatewayCalls).toBe(1);
     } finally {
       globalThis.fetch = original;
     }
@@ -339,12 +530,13 @@ describe("login flow (mocked account service)", () => {
     globalThis.fetch = async () =>
       json({
         code: "000000",
-        data: { balance: 100, dailyBalance: 20, availableBalance: 120 },
+        data: { balance: 100, dailyBalance: 20, availableBalance: 120, planName: "Pro" },
       });
     try {
       const hooks = await LoomyAuthPlugin({ client: fakeClient });
       const usage = await hooks.auth.usage(async () => ({ type: "api", key: "S", metadata: {} }));
       expect(usage.balance).toBe("120 积分");
+      expect(usage.plan).toBe("Pro");
       expect(usage.user).toBe("");
       expect(usage.windows).toHaveLength(1);
       const window = usage.windows[0];
@@ -360,11 +552,30 @@ describe("login flow (mocked account service)", () => {
     }
   });
 
+  test("a real zero available balance is not replaced by the local sum", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () =>
+      json({
+        code: "000000",
+        data: { balance: 100, dailyBalance: 20, availableBalance: 0 },
+      });
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      const usage = await hooks.auth.usage(async () => ({ type: "api", key: "S", metadata: {} }));
+      expect(usage.balance).toBe("0 积分");
+      expect(usage.windows[0].balance).toBe(0);
+      expect(usage.windows[0].display).toContain("可用 0");
+      expect(usage.plan).toBe("");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   test("checkin uses magpie's claimed outcome", async () => {
     const original = globalThis.fetch;
     let seen;
     globalThis.fetch = async (url, init) => {
-      seen = { url: String(url), method: init.method, body: init.body };
+      seen = { url: String(url), method: init.method, body: init.body, signal: init.signal };
       return json({ code: "000000" });
     };
     try {
@@ -373,11 +584,75 @@ describe("login flow (mocked account service)", () => {
       expect(result.outcome).toBe("claimed");
       expect(seen.url).toBe("https://loomyad.xunfei.cn/api/v1/points/first-login");
       expect(seen.method).toBe("POST");
+      expect(seen.signal).toBeInstanceOf(AbortSignal);
       // until 落在北京日 0 点，且在将来
       const until = Date.parse(result.until);
       expect(new Date(until).toISOString()).toBe(result.until);
       expect(until).toBeGreaterThan(Date.now());
       expect((until + 8 * 3600 * 1000) % 86400000).toBe(0);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("checkin treats an already-claimed day as done", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => json({ code: "100002", desc: "今日已签到" });
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      const result = await hooks.auth.checkin(async () => ({ type: "api", key: "S", metadata: {} }));
+      expect(result.outcome).toBe("done");
+      expect(result.message).toBe("今日已签到");
+      expect(Date.parse(result.until)).toBeGreaterThan(Date.now());
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("checkin keeps other upstream failures as failed", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => json({ code: "100003", desc: "活动已结束" });
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      const result = await hooks.auth.checkin(async () => ({ type: "api", key: "S", metadata: {} }));
+      expect(result).toEqual({ outcome: "failed", message: "活动已结束" });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("provider models marks a dead session for magpie", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => json({ code: "020002", desc: "登录已失效" });
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      let seen;
+      try {
+        await hooks.provider.models({ models: {} }, { auth: { type: "api", key: "S" } });
+      } catch (error) {
+        seen = error;
+      }
+      expect(seen.message).toBe("登录已失效");
+      expect(seen.signIn).toBe("expired");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("provider models returns the GUI shape with capabilities and rate", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () =>
+      json({
+        code: "000000",
+        data: [{ id: "spark-x", name: "Spark X2.5 (x0.1)", modalities: ["text", "image"] }],
+      });
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      const models = await hooks.provider.models({ models: {} }, { auth: { type: "api", key: "S" } });
+      expect(models["spark-x"].name).toBe("Spark X2.5");
+      expect(models["spark-x"].rate).toBe(0.1);
+      expect(models["spark-x"].capabilities.input.image).toBe(true);
+      expect(models["spark-x"].capabilities.toolcall).toBe(true);
     } finally {
       globalThis.fetch = original;
     }
@@ -425,13 +700,14 @@ describe("sms and desktop import", () => {
     }
   });
 
-  test("desktop import reads the leveldb log and validates the session", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "loomy-desktop-"));
-    const payload = Buffer.from(
-      "noise loomy-auth-session " +
-        JSON.stringify({ phone: "13900139000", session: "S-DESK", userid: "U-DESK" }),
-    );
-    writeFileSync(join(dir, "000003.log"), payload);
+  test("desktop import reads the leveldb log as a renewable oauth sign-in", async () => {
+    const loggedInAt = Date.now() - 60_000;
+    const dir = desktopDir({
+      phone: "13900139000",
+      session: "S-DESK",
+      userid: "U-DESK",
+      loggedInAt,
+    });
 
     const original = globalThis.fetch;
     const previous = process.env.LOOMY_DESKTOP_DIR;
@@ -445,11 +721,49 @@ describe("sms and desktop import", () => {
       const hooks = await LoomyAuthPlugin({ client: fakeClient });
       const result = await hooks.auth.methods[0].authorize();
       expect(result.type).toBe("success");
-      expect(result.key).toBe("S-DESK");
-      expect(result.metadata.email).toBe("13900139000");
+      expect(result.access).toBe("S-DESK");
+      expect(result.key).toBeUndefined();
+      // host 的 save() 以 "refresh" in result 判定 oauth；桌面端没有真 refresh token。
+      expect("refresh" in result).toBe(true);
+      expect(result.refresh).toBe("");
+      expect(result.source).toBe("desktop");
+      expect(result.accountId).toBe("13900139000");
+      expect(result.phone).toBe("13900139000");
+      expect(result.userId).toBe("U-DESK");
+      expect(result.expires).toBe(loggedInAt + SESSION_TTL);
       expect(modelCalls).toBe(1);
     } finally {
       globalThis.fetch = original;
+      if (previous === undefined) delete process.env.LOOMY_DESKTOP_DIR;
+      else process.env.LOOMY_DESKTOP_DIR = previous;
+    }
+  });
+
+  test("a masked phone is not used as the desktop account identity", async () => {
+    const dir = desktopDir({
+      maskedPhone: "139****9000",
+      session: "S-MASK",
+      userid: "U-MASK",
+      loggedInAt: Date.now(),
+    });
+    const previous = process.env.LOOMY_DESKTOP_DIR;
+    process.env.LOOMY_DESKTOP_DIR = dir;
+    try {
+      const found = readDesktopSession();
+      expect(found.session).toBe("S-MASK");
+      expect(found.phone).toBe("");
+
+      const original = globalThis.fetch;
+      globalThis.fetch = async () => json({ data: [] });
+      try {
+        const hooks = await LoomyAuthPlugin({ client: fakeClient });
+        const result = await hooks.auth.methods[0].authorize();
+        expect(result.accountId).toBeUndefined();
+        expect(result.phone).toBe("");
+      } finally {
+        globalThis.fetch = original;
+      }
+    } finally {
       if (previous === undefined) delete process.env.LOOMY_DESKTOP_DIR;
       else process.env.LOOMY_DESKTOP_DIR = previous;
     }
@@ -467,5 +781,70 @@ describe("sms and desktop import", () => {
       if (previous === undefined) delete process.env.LOOMY_DESKTOP_DIR;
       else process.env.LOOMY_DESKTOP_DIR = previous;
     }
+  });
+});
+
+describe("desktop renewal", () => {
+  test("refresh picks up a new desktop session", async () => {
+    const loggedInAt = Date.now() - 5_000;
+    const previous = process.env.LOOMY_DESKTOP_DIR;
+    process.env.LOOMY_DESKTOP_DIR = desktopDir({
+      phone: "13900139000",
+      session: "S-NEW",
+      userid: "U-NEW",
+      loggedInAt,
+    });
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      const got = await hooks.auth.refresh({
+        type: "oauth",
+        access: "S-OLD",
+        refresh: "",
+        expires: Date.now(),
+        source: "desktop",
+      });
+      expect(got).toMatchObject({
+        access: "S-NEW",
+        refresh: "",
+        source: "desktop",
+        phone: "13900139000",
+        userId: "U-NEW",
+      });
+      expect(got.expires).toBe(loggedInAt + SESSION_TTL);
+    } finally {
+      if (previous === undefined) delete process.env.LOOMY_DESKTOP_DIR;
+      else process.env.LOOMY_DESKTOP_DIR = previous;
+    }
+  });
+
+  test("refresh has nothing to do when the desktop session is unchanged or absent", async () => {
+    const previous = process.env.LOOMY_DESKTOP_DIR;
+    process.env.LOOMY_DESKTOP_DIR = desktopDir({
+      phone: "13900139000",
+      session: "S-SAME",
+      loggedInAt: Date.now(),
+    });
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      expect(await hooks.auth.refresh({ type: "oauth", access: "S-SAME", source: "desktop" })).toBeUndefined();
+
+      process.env.LOOMY_DESKTOP_DIR = mkdtempSync(join(tmpdir(), "loomy-empty-"));
+      expect(await hooks.auth.refresh({ type: "oauth", access: "S-SAME", source: "desktop" })).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.LOOMY_DESKTOP_DIR;
+      else process.env.LOOMY_DESKTOP_DIR = previous;
+    }
+  });
+
+  test("refresh leaves every other account type alone", async () => {
+    const hooks = await LoomyAuthPlugin({ client: fakeClient });
+    expect(await hooks.auth.refresh({ type: "oauth", access: "A", source: "sms" })).toBeUndefined();
+    expect(
+      await hooks.auth.refresh({
+        type: "api",
+        key: "K",
+        metadata: { phone: "13800138000", password: "pw" },
+      }),
+    ).toBeUndefined();
   });
 });
