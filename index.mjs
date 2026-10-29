@@ -75,12 +75,10 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
     }
   };
 
-  const sessionExpiry = (got) => got?.expireAt || Date.now() + SESSION_TTL;
-
   const save = async (auth, got, meta) => {
     const body =
       auth?.type === "oauth"
-        ? { ...auth, access: got.session, expires: sessionExpiry(got) }
+        ? { ...auth, access: got.session, expires: Date.now() + SESSION_TTL }
         : {
             ...(auth && typeof auth === "object" ? auth : {}),
             type: "api",
@@ -115,8 +113,8 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
       refreshLead: REFRESH_LEAD,
 
       // 桌面端登录态是 oauth：到期前重新读 leveldb，客户端重登后自动换上
-      // 新 session；短信/粘贴的账号没有 refresh token，只有本机桌面端登录的
-      // 是同一个手机号时才能借它的 session 续期。
+      // 新 session。短信/粘贴的账号按滑动 TTL 不写 expires，平时走不到这里；
+      // 旧版本留下的、带 expires 的非桌面账号仍可按同手机号借用。
       async refresh(auth) {
         const found = readDesktopSession();
         if (!found?.session || found.session === auth?.access) return undefined;
@@ -202,7 +200,8 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
                     type: "success",
                     access: got.session,
                     refresh: "",
-                    expires: sessionExpiry(got),
+                    // 滑动 TTL：不写本地过期，能不能用只由服务端说（401/100002）；
+                    // 本地写死 14 天会让 magpie 提前把它当临期账号。
                     accountId: got.phone || phone,
                     uid: got.userid || undefined,
                     phone,

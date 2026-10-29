@@ -689,34 +689,13 @@ describe("sms and desktop import", () => {
       expect(result.type).toBe("success");
       expect(result.access).toBe("S-SMS");
       expect(result.accountId).toBe("13800138000");
-      expect(result.expires).toBeGreaterThan(Date.now());
+      // 滑动 TTL：不写本地过期，是否失效只由服务端（401/100002）说了算。
+      expect("expires" in result).toBe(false);
 
       const check = calls.find((c) => c.url.endsWith("/login/phone/checkCode"));
       expect(check.body.param.msgid).toBe("M-1");
       expect(check.body.param.mcode).toBe("123456");
       expect(check.body.param.expire).toBe(14 * 24 * 3600);
-    } finally {
-      globalThis.fetch = original;
-    }
-  });
-
-  test("a server-given expireAt wins over the 14-day guess", async () => {
-    const original = globalThis.fetch;
-    const expireAt = Math.floor(Date.now() / 1000) + 3600;
-    globalThis.fetch = async (url) => {
-      if (String(url).endsWith("/login/phone/sendMsgCode")) {
-        return json({ code: "000000", data: { msgid: "M-2" } });
-      }
-      if (String(url).endsWith("/login/phone/checkCode")) {
-        return json({ code: "000000", data: { session: "S-2", userid: "U-2", expireAt } });
-      }
-      return json({ code: "404" }, 404);
-    };
-    try {
-      const hooks = await LoomyAuthPlugin({ client: fakeClient });
-      const started = await hooks.auth.methods[1].authorize({ phone: "13800138000" });
-      const result = await started.callback("123456");
-      expect(result.expires).toBe(expireAt * 1000);
     } finally {
       globalThis.fetch = original;
     }

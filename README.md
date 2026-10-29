@@ -1,6 +1,6 @@
 # opencode-loomy-auth
 
-把 **讯飞Loomy** 账号变成 magpie / OpenCode 的一个供应商：手机号+密码、手机号+短信、桌面端登录态导入或粘贴 session，拿到 14 天 session，替 agent 发 OpenAI 兼容请求。
+把 **讯飞Loomy** 账号变成 magpie / OpenCode 的一个供应商：手机号+密码、手机号+短信、桌面端登录态导入或粘贴 session，替 agent 发 OpenAI 兼容请求。
 
 本包是 [loomy2api](https://github.com/Patrick130306/loomy2api) 的插件化移植：只保留账号服务签名、密码 RSA 加密、session 管理与模型网关请求头。HTTP 网关、账号池、失败切换、限流、面板、Anthropic 协议转换都由 magpie 自带，不再重复实现。
 
@@ -20,19 +20,19 @@ magpie quota
 | 方式 | 存什么 | 说明 |
 |---|---|---|
 | 自动导入 Loomy 桌面端登录态 | `type` = oauth，`access` = session | 读取本机 Loomy 客户端已登录的账号，无需短信；magpie 到期前通过 `auth.refresh` 重新读客户端登录态，客户端重登后自动换成新 session |
-| 手机号 + 短信验证码 | `type` = oauth，`access` = session | 输入手机号后自动发码，再输 6 位验证码；不落密码，Loomy 无 refresh token。本机（或挂载进来的）桌面端登录同一手机号时，可借其 session 续期 |
+| 手机号 + 短信验证码 | `type` = oauth，`access` = session | 输入手机号后自动发码，再输 6 位验证码；不落密码，Loomy 无 refresh token。按滑动 TTL 处理：**不写本地过期**，服务端返回 401/`100002` 才需重登 |
 | Loomy 手机号 + 密码 | `type` = api，`key` = session，`metadata` = 手机号、密码、设备标识 | 临近过期或请求 401/403 时自动重登；密码以明文写进 magpie 的 `plugin-auth.json` |
-| 粘贴已有 session | `type` = api，`key` = session | 不落密码，14 天后需重新粘贴 |
+| 粘贴已有 session | `type` = api，`key` = session | 不落密码；服务端返回 401/`100002` 后才需重新粘贴 |
 
 ### session 从哪里来
 
-1. **最简单：用手机号 + 密码**，插件登录后自动把 14 天 session 写进 magpie，不需要手动复制。
+1. **最简单：用手机号 + 密码**，插件登录后自动把 session 写进 magpie，不需要手动复制。
 2. **桌面端已在用**：Loomy 是 Electron 应用，登录态以明文 JSON 存在 Chromium Local Storage 的 `loomy-auth-session` 键里：
    - Windows `%APPDATA%\Loomy\Local Storage\leveldb\*.log`
    - macOS `~/Library/Application Support/Loomy/Local Storage/leveldb/*.log`
    - Linux `~/.config/Loomy/Local Storage/leveldb/*.log`
    插件会自动读取并调 `/api/v1/models` 校验；也可用 `LOOMY_DESKTOP_DIR` 指定目录。读到的登录态按 oauth 保存（`source` = `desktop`），到期前 magpie 会再读一次客户端登录态：只要客户端已经重新登录，就自动换上新的 session，不用重新导入。客户端登录态里若只有打码手机号（`maskedPhone`），插件不会把它当账号手机号，只保留 session 本身。magpie 跑在容器里时，需要把客户端的 `Local Storage/leveldb` 目录挂进容器并设 `LOOMY_DESKTOP_DIR`。
-3. **不想给密码**：用短信验证码方式，登录后同样得到 14 天 session。
+3. **不想给密码**：用短信验证码方式登录；session 按滑动 TTL 处理，不写本地过期。
 4. **已有 session**：直接粘贴；session 就是模型网关的 Bearer token。
 
 想先看一眼桌面端的 session：
@@ -63,7 +63,7 @@ Loomy 没有标准 OAuth / 设备码授权接口（本插件里的 `type` = oaut
 | `provider.models` | `GET /models` 动态列表，映射成宿主 GUI 形状（`capabilities`、`rate`/`free`），失败时沿用内置清单；session 失效错误码 `020002`/`100002` 会抛 `signIn: "expired"` |
 | 401/403 | 有密码时自动重登一次并重试，新 session 写回账号；没有可用重登时标出需要重新登录 |
 
-session 有效期 14 天，Loomy 没有 refresh token。桌面端导入按 oauth 保存并实现 `auth.refresh`：到期前重新读桌面端登录态，客户端重登过就自动续上。短信账号没有密码可重登，但若本机桌面端登录的是同一个手机号，`auth.refresh` 会借用桌面端的 session 续期；借不到就只能重新短信登录。粘贴的账号没有可续凭据，14 天后需重新粘贴。密码账号按 api 保存，在临近过期和请求 401/403 时用密码重登。没有密码可重登的账号，loader 会把首次 401/403 的响应加上 `X-Magpie-Sign-In: expired`，`provider.models` 遇到 session 失效错误码也会抛 `signIn: "expired"`，让 magpie 标记账号。通常不需要手动重新登录。
+Loomy 的 session 没有 refresh token，也没有公开的续期端点。本插件按**滑动 TTL** 处理短信与粘贴的账号：不写本地过期时间，magpie 不会因为「登录满 14 天」而提前把它当临期账号；能否继续用只由服务端说了算（401 或业务码 `100002` 时标为需重新登录）。桌面端导入的账号仍按客户端登录态记 `expires`：到期前 magpie 会重读 leveldb，客户端重登过就自动续上。密码账号按 api 保存，在临近过期和请求 401/403 时用密码重登。没有密码可重登的账号，loader 会把首次 401/403 的响应加上 `X-Magpie-Sign-In: expired`，`provider.models` 遇到 session 失效错误码也会抛 `signIn: "expired"`，让 magpie 标记账号。
 
 ## 路由与配额
 
