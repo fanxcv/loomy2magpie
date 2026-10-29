@@ -700,6 +700,28 @@ describe("sms and desktop import", () => {
     }
   });
 
+  test("a server-given expireAt wins over the 14-day guess", async () => {
+    const original = globalThis.fetch;
+    const expireAt = Math.floor(Date.now() / 1000) + 3600;
+    globalThis.fetch = async (url) => {
+      if (String(url).endsWith("/login/phone/sendMsgCode")) {
+        return json({ code: "000000", data: { msgid: "M-2" } });
+      }
+      if (String(url).endsWith("/login/phone/checkCode")) {
+        return json({ code: "000000", data: { session: "S-2", userid: "U-2", expireAt } });
+      }
+      return json({ code: "404" }, 404);
+    };
+    try {
+      const hooks = await LoomyAuthPlugin({ client: fakeClient });
+      const started = await hooks.auth.methods[1].authorize({ phone: "13800138000" });
+      const result = await started.callback("123456");
+      expect(result.expires).toBe(expireAt * 1000);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   test("desktop import reads the leveldb log as a renewable oauth sign-in", async () => {
     const loggedInAt = Date.now() - 60_000;
     const dir = desktopDir({

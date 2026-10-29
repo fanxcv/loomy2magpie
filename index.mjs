@@ -75,10 +75,12 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
     }
   };
 
+  const sessionExpiry = (got) => got?.expireAt || Date.now() + SESSION_TTL;
+
   const save = async (auth, got, meta) => {
     const body =
       auth?.type === "oauth"
-        ? { ...auth, access: got.session, expires: Date.now() + SESSION_TTL }
+        ? { ...auth, access: got.session, expires: sessionExpiry(got) }
         : {
             ...(auth && typeof auth === "object" ? auth : {}),
             type: "api",
@@ -200,7 +202,7 @@ export const LoomyAuthPlugin = async ({ client } = {}) => {
                     type: "success",
                     access: got.session,
                     refresh: "",
-                    expires: Date.now() + SESSION_TTL,
+                    expires: sessionExpiry(got),
                     accountId: got.phone || phone,
                     uid: got.userid || undefined,
                     phone,
